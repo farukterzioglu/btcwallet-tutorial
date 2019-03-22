@@ -110,6 +110,7 @@ var rpcHandlers = map[string]struct {
 	"walletlock":             {handler: walletLock},
 	"walletpassphrase":       {handler: walletPassphrase},
 	"walletpassphrasechange": {handler: walletPassphraseChange},
+	"transfertransaction":    {handler: transferTransaction},
 
 	// Reference implementation methods (still unimplemented)
 	"backupwallet":         {handler: unimplemented, noHelp: true},
@@ -1936,4 +1937,11 @@ func decodeHexStr(hexStr string) ([]byte, error) {
 		}
 	}
 	return decoded, nil
+}
+
+func transferTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	cmd := icmd.(*btcjson.TransferTransactionCmd)
+
+	fmt.Printf("Address : %s, TxID : %s", cmd.Address, cmd.TxID)
+	return "", nil
 }
