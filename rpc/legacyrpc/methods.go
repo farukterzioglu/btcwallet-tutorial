@@ -1941,7 +1941,41 @@ func decodeHexStr(hexStr string) ([]byte, error) {
 
 func transferTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*btcjson.TransferTransactionCmd)
+	fmt.Printf("Address : %s, TxID : %s\n", cmd.Address, cmd.TxID)
 
-	fmt.Printf("Address : %s, TxID : %s", cmd.Address, cmd.TxID)
-	return "", nil
+	address := cmd.Address
+	txHash, err := chainhash.NewHashFromStr(cmd.TxID)
+	if err != nil {
+		return nil, &btcjson.RPCError{
+			Code:    btcjson.ErrRPCDecodeHexString,
+			Message: "Transaction hash string decode failed: " + err.Error(),
+		}
+	}
+
+	return transferToAddress(w, address, *txHash,
+		waddrmgr.DefaultAccountNum, 1, txrules.DefaultRelayFeePerKb)
+}
+
+func transferToAddress(w *wallet.Wallet, addrStr string, txHash chainhash.Hash,
+	account uint32, minconf int32, feeSatPerKb btcutil.Amount) (string, error) {
+
+	newTxHash, err := w.TransferTx(addrStr, txHash, account, minconf, feeSatPerKb)
+	if err != nil {
+		if waddrmgr.IsError(err, waddrmgr.ErrLocked) {
+			return "", &ErrWalletUnlockNeeded
+		}
+		switch err.(type) {
+		case btcjson.RPCError:
+			return "", err
+		}
+
+		return "", &btcjson.RPCError{
+			Code:    btcjson.ErrRPCInternal.Code,
+			Message: err.Error(),
+		}
+	}
+
+	txHashStr := newTxHash.String()
+	log.Infof("Successfully sent transaction %v\n", txHashStr)
+	return txHashStr, nil
 }

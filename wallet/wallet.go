@@ -3624,3 +3624,9 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 
 	return w, nil
 }
+
+func (w *Wallet) TransferTx(address string, txHash chainhash.Hash, account uint32, minconf int32, feeSatPerKb btcutil.Amount) (*chainhash.Hash, error) {
+	fmt.Printf("wallet.TransferTx -> address: %s, txHash: %s\n", address, txHash)
+
+	return &chainhash.Hash{}, nil
+}
