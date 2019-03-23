@@ -1959,7 +1959,7 @@ func transferTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error
 func transferToAddress(w *wallet.Wallet, addrStr string, txHash chainhash.Hash,
 	account uint32, minconf int32, feeSatPerKb btcutil.Amount) (string, error) {
 
-	newTxHash, err := w.TransferTx(addrStr, txHash, account, minconf, feeSatPerKb)
+	_, err := w.TransferTx(addrStr, txHash, account, minconf, feeSatPerKb)
 	if err != nil {
 		if waddrmgr.IsError(err, waddrmgr.ErrLocked) {
 			return "", &ErrWalletUnlockNeeded
@@ -1975,7 +1975,5 @@ func transferToAddress(w *wallet.Wallet, addrStr string, txHash chainhash.Hash,
 		}
 	}
 
-	txHashStr := newTxHash.String()
-	log.Infof("Successfully sent transaction %v\n", txHashStr)
-	return txHashStr, nil
+	return "", nil
 }

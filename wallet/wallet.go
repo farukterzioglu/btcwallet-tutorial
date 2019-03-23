@@ -97,6 +97,9 @@ type Wallet struct {
 	// Channel for transaction creation requests.
 	createTxRequests chan createTxRequest
 
+	// Channel for transaction transfer requests
+	createTxTransferRequests chan createTxTransferRequest
+
 	// Channels for the manager locker.
 	unlockRequests     chan unlockRequest
 	lockRequests       chan struct{}
@@ -141,6 +144,7 @@ func (w *Wallet) Start() {
 	w.wg.Add(2)
 	go w.txCreator()
 	go w.walletLocker()
+	go w.txTransferCreator()
 }
 
 // SynchronizeRPC associates the wallet with the consensus RPC client,
@@ -3595,26 +3599,27 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	log.Infof("Opened wallet") // TODO: log balance? last sync height?
 
 	w := &Wallet{
-		publicPassphrase:    pubPass,
-		db:                  db,
-		Manager:             addrMgr,
-		TxStore:             txMgr,
-		lockedOutpoints:     map[wire.OutPoint]struct{}{},
-		recoveryWindow:      recoveryWindow,
-		rescanAddJob:        make(chan *RescanJob),
-		rescanBatch:         make(chan *rescanBatch),
-		rescanNotifications: make(chan interface{}),
-		rescanProgress:      make(chan *RescanProgressMsg),
-		rescanFinished:      make(chan *RescanFinishedMsg),
-		createTxRequests:    make(chan createTxRequest),
-		unlockRequests:      make(chan unlockRequest),
-		lockRequests:        make(chan struct{}),
-		holdUnlockRequests:  make(chan chan heldUnlock),
-		lockState:           make(chan bool),
-		changePassphrase:    make(chan changePassphraseRequest),
-		changePassphrases:   make(chan changePassphrasesRequest),
-		chainParams:         params,
-		quit:                make(chan struct{}),
+		publicPassphrase:         pubPass,
+		db:                       db,
+		Manager:                  addrMgr,
+		TxStore:                  txMgr,
+		lockedOutpoints:          map[wire.OutPoint]struct{}{},
+		recoveryWindow:           recoveryWindow,
+		rescanAddJob:             make(chan *RescanJob),
+		rescanBatch:              make(chan *rescanBatch),
+		rescanNotifications:      make(chan interface{}),
+		rescanProgress:           make(chan *RescanProgressMsg),
+		rescanFinished:           make(chan *RescanFinishedMsg),
+		createTxRequests:         make(chan createTxRequest),
+		unlockRequests:           make(chan unlockRequest),
+		lockRequests:             make(chan struct{}),
+		holdUnlockRequests:       make(chan chan heldUnlock),
+		lockState:                make(chan bool),
+		changePassphrase:         make(chan changePassphraseRequest),
+		changePassphrases:        make(chan changePassphrasesRequest),
+		chainParams:              params,
+		quit:                     make(chan struct{}),
+		createTxTransferRequests: make(chan createTxTransferRequest),
 	}
 
 	w.NtfnServer = newNotificationServer(w)
@@ -3625,8 +3630,64 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	return w, nil
 }
 
+type (
+	createTxTransferRequest struct {
+		account     uint32
+		address     string
+		txHash      chainhash.Hash
+		minconf     int32
+		feeSatPerKB btcutil.Amount
+		resp        chan createTxTransferResponse
+	}
+	createTxTransferResponse struct {
+		tx  *txauthor.AuthoredTx
+		err error
+	}
+)
+
+func (w *Wallet) txTransferCreator() {
+	quit := w.quitChan()
+out:
+	for {
+		select {
+		case txr := <-w.createTxTransferRequests:
+			heldUnlock, err := w.holdUnlock()
+			if err != nil {
+				txr.resp <- createTxTransferResponse{nil, err}
+				continue
+			}
+			tx, err := w.txTransferToOutputs(txr.address, txr.txHash, txr.account,
+				txr.minconf, txr.feeSatPerKB)
+			heldUnlock.release()
+			txr.resp <- createTxTransferResponse{tx, err}
+		case <-quit:
+			break out
+		}
+	}
+	w.wg.Done()
+}
+
+// TransferTx is ...
 func (w *Wallet) TransferTx(address string, txHash chainhash.Hash, account uint32, minconf int32, feeSatPerKb btcutil.Amount) (*chainhash.Hash, error) {
 	fmt.Printf("wallet.TransferTx -> address: %s, txHash: %s\n", address, txHash)
 
-	return &chainhash.Hash{}, nil
+	req := createTxTransferRequest{
+		account:     account,
+		address:     address,
+		txHash:      txHash,
+		minconf:     minconf,
+		feeSatPerKB: feeSatPerKb,
+		resp:        make(chan createTxTransferResponse),
+	}
+	w.createTxTransferRequests <- req
+	<-req.resp
+
+	return nil, nil
+}
+
+func (w *Wallet) txTransferToOutputs(address string, txHash chainhash.Hash, account uint32,
+	minconf int32, feeSatPerKB btcutil.Amount) (tx *txauthor.AuthoredTx, err error) {
+	fmt.Printf("txTransferToOutputs... \n")
+
+	return nil, nil
 }
