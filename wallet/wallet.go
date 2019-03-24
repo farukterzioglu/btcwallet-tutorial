@@ -3689,5 +3689,90 @@ func (w *Wallet) txTransferToOutputs(address string, txHash chainhash.Hash, acco
 	minconf int32, feeSatPerKB btcutil.Amount) (tx *txauthor.AuthoredTx, err error) {
 	fmt.Printf("txTransferToOutputs... \n")
 
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
+	var txToBoTransferred wtxmgr.Credit
+
+	err = walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+		// Get current block's height and hash.
+		bs, err := chainClient.BlockStamp()
+		if err != nil {
+			return err
+		}
+
+		// Find only the transaction with hash 'txHash' that belong to 'account'
+		// If not found any, or the found one isn't eligible, throw a relevant exception
+		// Eligible if : has 'minconf' confirmation & unspent
+		// Eventually will return only post-dated cheques
+		txToBoTransferred, err = w.findTheTransaction(dbtx, txHash, account, minconf, bs)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("Found : %d", txToBoTransferred.Amount)
+
 	return nil, nil
+}
+
+func (w *Wallet) findTheTransaction(dbtx walletdb.ReadTx, txHash chainhash.Hash,
+	account uint32, minconf int32, bs *waddrmgr.BlockStamp) (wtxmgr.Credit, error) {
+
+	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
+	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+
+	unspent, err := w.TxStore.UnspentOutputs(txmgrNs)
+	if err != nil {
+		return wtxmgr.Credit{}, err
+	}
+	fmt.Printf("Total unspent tx count : %d\n", len(unspent))
+
+	var eligible wtxmgr.Credit
+	for i := range unspent {
+		output := &unspent[i]
+		fmt.Printf("Unspent tx : %s - %d \n", output.Hash, output.Amount)
+
+		if output.Hash != txHash {
+			continue
+		}
+
+		if !confirmed(minconf, output.Height, bs.Height) {
+			continue
+		}
+		if output.FromCoinBase {
+			target := int32(w.chainParams.CoinbaseMaturity)
+			if !confirmed(target, output.Height, bs.Height) {
+				continue
+			}
+		}
+
+		// Locked unspent outputs are skipped.
+		if w.LockedOutpoint(output.OutPoint) {
+			continue
+		}
+
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			output.PkScript, w.chainParams)
+		if err != nil || len(addrs) != 1 {
+			fmt.Println("%s\n", err.Error())
+			continue
+		}
+
+		_, addrAcct, err := w.Manager.AddrAccount(addrmgrNs, addrs[0])
+		fmt.Printf("Found account : %d, Current account : %d\n", addrAcct, account)
+		if err != nil {
+			fmt.Println("%s\n", err.Error())
+			continue
+		}
+
+		if addrAcct == account {
+			eligible = *output
+			return eligible, nil
+		}
+	}
+	return eligible, nil
 }
