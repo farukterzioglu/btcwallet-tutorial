@@ -3714,9 +3714,21 @@ func (w *Wallet) txTransferToOutputs(address string, txHash chainhash.Hash, acco
 		return nil, err
 	}
 
-	fmt.Printf("Found : %d", txToBoTransferred.Amount)
+	amount := txToBoTransferred.Amount
 
-	return nil, nil
+	// Make outputs for tx to be transferred
+	redeemOutput, err := makeOutput(address, amount, w.ChainParams())
+	if err != nil {
+		return nil, err
+	}
+
+	// Ensure the outputs to be created adhere to the network's consensus
+	// rules.
+	if err := txrules.CheckOutput(redeemOutput, feeSatPerKB); err != nil {
+		return nil, err
+	}
+
+	return newUnsignedTransactionFromInput(&txToBoTransferred, redeemOutput)
 }
 
 func (w *Wallet) findTheTransaction(dbtx walletdb.ReadTx, txHash chainhash.Hash,
@@ -3775,4 +3787,41 @@ func (w *Wallet) findTheTransaction(dbtx walletdb.ReadTx, txHash chainhash.Hash,
 		}
 	}
 	return eligible, nil
+}
+
+// makeOutput creates a transaction output from a pair of address
+// strings to amounts.  This is used to create the outputs to include in newly
+// created transactions from a JSON object describing the output destinations
+// and amounts.
+func makeOutput(addrStr string, amt btcutil.Amount, chainParams *chaincfg.Params) (*wire.TxOut, error) {
+	addr, err := btcutil.DecodeAddress(addrStr, chainParams)
+	if err != nil {
+		return nil, fmt.Errorf("cannot decode address: %s", err)
+	}
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create txout script: %s", err)
+	}
+
+	output := wire.NewTxOut(int64(amt), pkScript)
+	return output, nil
+}
+
+func newUnsignedTransactionFromInput(credit *wtxmgr.Credit, output *wire.TxOut) (*txauthor.AuthoredTx, error) {
+	// Create input from transaction to be transferred
+	nextInput := wire.NewTxIn(&credit.OutPoint, nil, nil)
+	inputs := []*wire.TxIn{nextInput}
+	outputs := []*wire.TxOut{output}
+
+	unsignedTransaction := &wire.MsgTx{
+		Version:  wire.TxVersion,
+		LockTime: 0,
+		TxIn:     inputs,
+		TxOut:    outputs,
+	}
+
+	return &txauthor.AuthoredTx{
+		Tx: unsignedTransaction,
+	}, nil
 }
