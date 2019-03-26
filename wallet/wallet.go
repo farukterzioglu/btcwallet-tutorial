@@ -3730,6 +3730,7 @@ func (w *Wallet) txTransferToOutputs(address string, txHash chainhash.Hash, acco
 	}
 
 	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+		addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
 		// Get current block's height and hash.
 		bs, err := chainClient.BlockStamp()
 		if err != nil {
@@ -3750,16 +3751,46 @@ func (w *Wallet) txTransferToOutputs(address string, txHash chainhash.Hash, acco
 		}
 
 		inputSource := makeInputSource(eligible)
+		changeSource := func() ([]byte, error) {
+			// Derive the change output script.  As a hack to allow
+			// spending from the imported account, change addresses
+			// are created from account 0.
+			var changeAddr btcutil.Address
+			var err error
+			if account == waddrmgr.ImportedAddrAccount {
+				changeAddr, err = w.newChangeAddress(addrmgrNs, 0)
+			} else {
+				changeAddr, err = w.newChangeAddress(addrmgrNs, account)
+			}
+			if err != nil {
+				return nil, err
+			}
+			return txscript.PayToAddrScript(changeAddr)
+		}
 
-		tx, err = newUnsignedTransactionFromInput(&txToBoTransferred, redeemOutput, feeSatPerKB, inputSource)
+		tx, err = newUnsignedTransactionFromInput(&txToBoTransferred, redeemOutput, feeSatPerKB,
+			inputSource, changeSource)
 		if err != nil {
 			return err
+		}
+
+		// Randomize change position, if change exists, before signing.
+		// This doesn't affect the serialize size, so the change amount
+		// will still be valid.
+		if tx.ChangeIndex >= 0 {
+			tx.RandomizeChangePosition()
 		}
 
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	if tx.ChangeIndex >= 0 && account == waddrmgr.ImportedAddrAccount {
+		changeAmount := btcutil.Amount(tx.Tx.TxOut[tx.ChangeIndex].Value)
+		log.Warnf("Spend from imported account produced change: moving"+
+			" %v from imported account into default account.", changeAmount)
 	}
 
 	return
@@ -3843,7 +3874,7 @@ func makeOutput(addrStr string, amt btcutil.Amount, chainParams *chaincfg.Params
 }
 
 func newUnsignedTransactionFromInput(credit *wtxmgr.Credit, output *wire.TxOut, relayFeePerKb btcutil.Amount,
-	fetchInputs txauthor.InputSource) (*txauthor.AuthoredTx, error) {
+	fetchInputs txauthor.InputSource, fetchChange txauthor.ChangeSource) (*txauthor.AuthoredTx, error) {
 	// Create input from transaction to be transferred
 	nextInput := wire.NewTxIn(&credit.OutPoint, nil, nil)
 	outputs := []*wire.TxOut{output}
@@ -3902,11 +3933,30 @@ func newUnsignedTransactionFromInput(credit *wtxmgr.Credit, output *wire.TxOut, 
 			TxOut:    outputs,
 		}
 
+		changeIndex := -1
+		changeAmount := inputAmount - targetAmount - maxRequiredFee
+		if changeAmount != 0 && !txrules.IsDustAmount(changeAmount,
+			txsizes.P2WPKHPkScriptSize, relayFeePerKb) {
+			changeScript, err := fetchChange()
+			if err != nil {
+				return nil, err
+			}
+			if len(changeScript) > txsizes.P2WPKHPkScriptSize {
+				return nil, errors.New("fee estimation requires change " +
+					"scripts no larger than P2WPKH output scripts")
+			}
+			change := wire.NewTxOut(int64(changeAmount), changeScript)
+			l := len(outputs)
+			unsignedTransaction.TxOut = append(outputs[:l:l], change)
+			changeIndex = l
+		}
+
 		return &txauthor.AuthoredTx{
 			Tx:              unsignedTransaction,
 			PrevScripts:     scripts,
 			PrevInputValues: inputValues,
 			TotalInput:      inputAmount,
+			ChangeIndex:     changeIndex,
 		}, nil
 	}
 }
