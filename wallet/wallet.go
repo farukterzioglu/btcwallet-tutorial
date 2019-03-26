@@ -27,6 +27,7 @@ import (
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/txsizes"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -3728,7 +3729,40 @@ func (w *Wallet) txTransferToOutputs(address string, txHash chainhash.Hash, acco
 		return nil, err
 	}
 
-	return newUnsignedTransactionFromInput(&txToBoTransferred, redeemOutput)
+	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+		// Get current block's height and hash.
+		bs, err := chainClient.BlockStamp()
+		if err != nil {
+			return err
+		}
+
+		eligible, err := w.findEligibleOutputs(dbtx, account, minconf, bs)
+		if err != nil {
+			return err
+		}
+
+		// Remove transaction to be transferred from eligible inputs
+		// If we do not, it causes duplicate inputs error
+		for idx, item := range eligible {
+			if item.Hash == txHash {
+				eligible = append(eligible[:idx], eligible[idx+1:]...)
+			}
+		}
+
+		inputSource := makeInputSource(eligible)
+
+		tx, err = newUnsignedTransactionFromInput(&txToBoTransferred, redeemOutput, feeSatPerKB, inputSource)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return
 }
 
 func (w *Wallet) findTheTransaction(dbtx walletdb.ReadTx, txHash chainhash.Hash,
@@ -3808,20 +3842,71 @@ func makeOutput(addrStr string, amt btcutil.Amount, chainParams *chaincfg.Params
 	return output, nil
 }
 
-func newUnsignedTransactionFromInput(credit *wtxmgr.Credit, output *wire.TxOut) (*txauthor.AuthoredTx, error) {
+func newUnsignedTransactionFromInput(credit *wtxmgr.Credit, output *wire.TxOut, relayFeePerKb btcutil.Amount,
+	fetchInputs txauthor.InputSource) (*txauthor.AuthoredTx, error) {
 	// Create input from transaction to be transferred
 	nextInput := wire.NewTxIn(&credit.OutPoint, nil, nil)
-	inputs := []*wire.TxIn{nextInput}
 	outputs := []*wire.TxOut{output}
 
-	unsignedTransaction := &wire.MsgTx{
-		Version:  wire.TxVersion,
-		LockTime: 0,
-		TxIn:     inputs,
-		TxOut:    outputs,
-	}
+	targetAmount := credit.Amount
+	estimatedSize := txsizes.EstimateVirtualSize(0, 1, 0, outputs, true)
+	targetFee := txrules.FeeForSerializeSize(relayFeePerKb, estimatedSize)
 
-	return &txauthor.AuthoredTx{
-		Tx: unsignedTransaction,
-	}, nil
+	for {
+		// Fetch input only for fee
+		feeInputAmount, feeInputs, feeInputValues, feeScripts, err := fetchInputs(targetFee)
+		if err != nil {
+			return nil, err
+		}
+
+		// Couldn't find eligible input for fee
+		if feeInputAmount < targetFee {
+			return nil, errors.New("insufficient funds")
+		}
+
+		// Calculate input values from fee & transaction to be transferred
+		inputAmount := feeInputAmount + credit.Amount
+		inputs := append(feeInputs, nextInput)
+		inputValues := append(feeInputValues, credit.Amount)
+		scripts := append(feeScripts, credit.PkScript)
+
+		// We count the types of inputs, which we'll use to estimate
+		// the vsize of the transaction.
+		var nested, p2wpkh, p2pkh int
+		for _, pkScript := range scripts {
+			switch {
+			// If this is a p2sh output, we assume this is a
+			// nested P2WKH.
+			case txscript.IsPayToScriptHash(pkScript):
+				nested++
+			case txscript.IsPayToWitnessPubKeyHash(pkScript):
+				p2wpkh++
+			default:
+				p2pkh++
+			}
+		}
+
+		maxSignedSize := txsizes.EstimateVirtualSize(p2pkh, p2wpkh,
+			nested, outputs, true)
+		maxRequiredFee := txrules.FeeForSerializeSize(relayFeePerKb, maxSignedSize)
+		remainingAmount := inputAmount - targetAmount
+		if remainingAmount < maxRequiredFee {
+			targetFee = maxRequiredFee
+			continue
+		}
+
+		unsignedTransaction := &wire.MsgTx{
+			Version:  wire.TxVersion,
+			LockTime: 0,
+			TxIn:     inputs,
+			TxOut:    outputs,
+		}
+
+		return &txauthor.AuthoredTx{
+			Tx:              unsignedTransaction,
+			PrevScripts:     scripts,
+			PrevInputValues: inputValues,
+			TotalInput:      inputAmount,
+		}, nil
+	}
 }
