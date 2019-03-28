@@ -3681,9 +3681,13 @@ func (w *Wallet) TransferTx(address string, txHash chainhash.Hash, account uint3
 		resp:        make(chan createTxTransferResponse),
 	}
 	w.createTxTransferRequests <- req
-	<-req.resp
+	resp := <-req.resp
 
-	return nil, nil
+	if resp.err != nil {
+		return nil, resp.err
+	}
+
+	return w.publishTransaction(resp.tx.Tx)
 }
 
 func (w *Wallet) txTransferToOutputs(address string, txHash chainhash.Hash, account uint32,
@@ -3781,8 +3785,18 @@ func (w *Wallet) txTransferToOutputs(address string, txHash chainhash.Hash, acco
 			tx.RandomizeChangePosition()
 		}
 
+		err = tx.AddAllInputScripts(secretSource{w.Manager, addrmgrNs})
+		if err != nil {
+			return err
+		}
+
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	err = validateMsgTx(tx.Tx, tx.PrevScripts, tx.PrevInputValues)
 	if err != nil {
 		return nil, err
 	}
@@ -3896,7 +3910,7 @@ func newUnsignedTransactionFromInput(credit *wtxmgr.Credit, output *wire.TxOut, 
 		}
 
 		// Calculate input values from fee & transaction to be transferred
-		inputAmount := feeInputAmount + credit.Amount
+		inputAmount := feeInputAmount + credit.Amount 
 		inputs := append(feeInputs, nextInput)
 		inputValues := append(feeInputValues, credit.Amount)
 		scripts := append(feeScripts, credit.PkScript)
